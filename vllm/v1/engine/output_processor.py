@@ -261,7 +261,8 @@ class RequestState:
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
-            stop_reason=stop_reason if finished else None)
+            stop_reason=stop_reason if finished else None,
+            hidden_states=getattr(self, '_layer_hidden_states', None))
 
     def _new_pooling_output(
         self,
@@ -392,6 +393,10 @@ class OutputProcessor:
             kv_transfer_params = engine_core_output.kv_transfer_params
             num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
+            
+            # Store layer hidden states for this request if available
+            if engine_core_output.layer_hidden_states:
+                req_state._layer_hidden_states = engine_core_output.layer_hidden_states
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None

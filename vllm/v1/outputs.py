@@ -115,6 +115,9 @@ class ModelRunnerOutput:
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
+    
+    # Hidden states for specific layers (req_id -> {layer_idx: [floats...]})
+    layer_hidden_states: Optional[dict[str, dict[int, list[float]]]] = None
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],

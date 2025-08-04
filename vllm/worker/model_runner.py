@@ -1741,7 +1741,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             
         # Check if hidden states collection is requested
         hidden_states_config = self._get_hidden_states_config(model_input.sampling_metadata)
-        print(f"hidden_states_config: {hidden_states_config}")
+        logger.info(f"hidden_states_config: {hidden_states_config}")
         if hidden_states_config:
             model_kwargs['_vllm_hidden_states_layers'] = hidden_states_config
             
@@ -1896,9 +1896,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         # Process layer-wise hidden states if requested
         if hidden_states_config and isinstance(hidden_or_intermediate_states, IntermediateTensors):
-            print(f"hidden_or_intermediate_states: YES")
+            logger.info(f"Processing layer hidden states from IntermediateTensors")
             layer_hidden_states = self._extract_layer_hidden_states(
                 hidden_or_intermediate_states, hidden_states_config, model_input)
+            logger.info(f"Extracted layer_hidden_states: {layer_hidden_states is not None}")
             if layer_hidden_states:
                 # Store in output for access by serving layer
                 if not hasattr(output, 'layer_hidden_states'):

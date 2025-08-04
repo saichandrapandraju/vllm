@@ -1605,6 +1605,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             sample_hidden_states = hidden_states[logits_indices]
             logits = self.model.compute_logits(sample_hidden_states, None)
+            
+            # Process layer-wise hidden states if requested 
+            layer_hidden_states = None
+            hidden_states_config = self._get_hidden_states_config(scheduler_output)
+            if hidden_states_config and isinstance(hidden_states, torch.Tensor):
+                # For V1, we need to extract from the regular hidden states tensor
+                # Get the last token hidden states for each sequence
+                layer_hidden_states = self._extract_layer_hidden_states_v1(
+                    hidden_states, hidden_states_config, logits_indices)
         if broadcast_pp_output:
             model_output_broadcast_data = {
                 "logits": logits.contiguous(),
@@ -1743,7 +1752,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.eplb_step()
 
-        return ModelRunnerOutput(
+        model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
@@ -1754,6 +1763,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
         )
+        
+        # Attach layer hidden states if available
+        if layer_hidden_states:
+            # Convert to per-request format {req_id: {layer_idx: [floats...]}}
+            layer_hidden_states_per_req = {}
+            for i, req_id in enumerate(self.input_batch.req_ids):
+                if i < len(layer_hidden_states):
+                    layer_hidden_states_per_req[req_id] = layer_hidden_states
+            model_runner_output.layer_hidden_states = layer_hidden_states_per_req
+            
+        return model_runner_output
 
     def propose_draft_token_ids(
         self,
@@ -2119,6 +2139,65 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return num_nans_in_logits
         except IndexError:
             return {}
+    
+    def _get_hidden_states_config(self, scheduler_output: "SchedulerOutput") -> Optional[list[int]]:
+        """Check if any sequences request hidden states and return target layers.
+        
+        Returns:
+            List of layer indices to collect, or None if no collection needed
+        """
+        from vllm.logger import init_logger
+        logger = init_logger(__name__)
+        
+        # Get sampling params from requests
+        for req_id in self.input_batch.req_ids:
+            req_state = self.requests.get(req_id)
+            if req_state and req_state.sampling_params:
+                if getattr(req_state.sampling_params, 'return_hidden_states', False):
+                    num_layers = self.model_config.get_num_layers(self.parallel_config)
+                    target_layers = req_state.sampling_params.resolve_hidden_states_layers(num_layers)
+                    if target_layers:
+                        final_layer_idx = num_layers - 1
+                        logger.info(f"V1 Backend: Hidden states requested for layers {target_layers}")
+                        if final_layer_idx not in target_layers:
+                            logger.warning(f"V1 Backend: Requested layers {target_layers} but V1 only supports final layer ({final_layer_idx}). "
+                                         f"Consider using V0 backend for intermediate layer access.")
+                        return target_layers
+        return None
+        
+    def _extract_layer_hidden_states_v1(self, hidden_states: torch.Tensor, target_layers: list[int], logits_indices: torch.Tensor):
+        """Extract and format hidden states from V1 model output.
+        
+        V1 backend limitation: Can only provide final layer hidden states.
+        Only returns states if the final layer was actually requested by the user.
+        
+        Returns:
+            Dict mapping layer indices to hidden state lists for last token, or None
+        """
+        from vllm.logger import init_logger
+        logger = init_logger(__name__)
+        
+        if not target_layers:
+            return None
+            
+        # Get the actual final layer index
+        num_layers = self.model_config.get_num_layers(self.parallel_config)
+        final_layer_idx = num_layers - 1  # e.g., 31 for 32-layer model
+        
+        logger.info(f"V1 Backend: Requested layers {target_layers}, final layer is {final_layer_idx}")
+        
+        # Only return states if the user actually requested the final layer
+        if final_layer_idx in target_layers:
+            # Get hidden states for last tokens of each sequence
+            last_token_states = hidden_states[logits_indices]
+            logger.info(f"V1 Backend: Returning hidden states for final layer {final_layer_idx}")
+            return {final_layer_idx: last_token_states.cpu().flatten().tolist()}
+        else:
+            # User didn't request final layer, we can't provide what they want
+            logger.warning(f"V1 Backend: Cannot provide hidden states for layers {target_layers}. "
+                          f"V1 backend only supports final layer ({final_layer_idx}). "
+                          f"Use V0 backend for intermediate layer access.")
+            return None
 
     @contextmanager
     def maybe_randomize_inputs(self, input_ids: torch.Tensor):

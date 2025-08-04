@@ -117,6 +117,9 @@ class EngineCoreOutput(
 
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
+    
+    # Hidden states for specific layers {layer_idx: [floats...]}
+    layer_hidden_states: Optional[dict[int, list[float]]] = None
 
     @property
     def finished(self) -> bool:
