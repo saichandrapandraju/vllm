@@ -125,6 +125,10 @@ class SamplerOutput(
     # (used for models like EAGLE).
     prefill_hidden_states: Optional[torch.Tensor] = None
 
+    # Optional layer-wise hidden states from the model (vLLM-specific extension)
+    # Format: {layer_index: [h1, h2, ..., h_hidden_size]}
+    layer_hidden_states: Optional[dict[int, list[float]]] = None
+
     # Time taken in the forward pass for this across all workers
     model_forward_time: Optional[float] = None
 

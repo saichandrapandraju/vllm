@@ -179,6 +179,12 @@ class SamplingParams(
         extra_args: Arbitrary additional args, that can be used by custom
             sampling implementations, plugins, etc. Not used by any in-tree
             sampling implementations.
+        return_hidden_states: Whether to return hidden states of the last token
+            from specified layers. Defaults to False. (vLLM-specific extension)
+        hidden_states_layers: List of layer indices to return hidden states from.
+            Supports negative indexing (e.g., -1 for last layer). If None and
+            return_hidden_states is True, returns only the last layer.
+            (vLLM-specific extension)
     """
 
     n: int = 1
@@ -226,6 +232,42 @@ class SamplingParams(
     # Fields used for bad words
     bad_words: Optional[list[str]] = None
     _bad_words_token_ids: Optional[list[list[int]]] = None
+
+    # Fields for hidden states output (vLLM-specific extension)
+    return_hidden_states: bool = False
+    hidden_states_layers: Optional[list[int]] = None
+
+    def resolve_hidden_states_layers(self, num_layers: int) -> Optional[list[int]]:
+        """Resolve layer indices for hidden states collection.
+        
+        Args:
+            num_layers: Total number of layers in the model
+            
+        Returns:
+            List of resolved layer indices, or None if not collecting hidden states
+        """
+        if not self.return_hidden_states:
+            return None
+            
+        if self.hidden_states_layers is None:
+            # Default: return only last layer
+            return [num_layers - 1]
+            
+        # Resolve negative indices
+        resolved_layers = []
+        for layer_idx in self.hidden_states_layers:
+            if layer_idx < 0:
+                resolved_idx = num_layers + layer_idx
+            else:
+                resolved_idx = layer_idx
+                
+            # Validate layer index
+            if 0 <= resolved_idx < num_layers:
+                resolved_layers.append(resolved_idx)
+            else:
+                logger.warning(f"Invalid layer index {layer_idx} for model with {num_layers} layers")
+                
+        return resolved_layers if resolved_layers else None
 
     @staticmethod
     def from_optional(

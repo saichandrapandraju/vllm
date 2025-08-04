@@ -371,8 +371,10 @@ class LlamaModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors, tuple[torch.Tensor,
                                                         list[torch.Tensor]]]:
+        print(f"kwargs: {kwargs}")
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -384,20 +386,47 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        # Check if layer-wise hidden states collection is requested
+        collect_layers = kwargs.get('_vllm_hidden_states_layers')
+        layer_hidden_states = {} if collect_layers else None
+        
         aux_hidden_states = []
         for idx, layer in enumerate(
                 self.layers[self.start_layer:self.end_layer]):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
+            
+            # Collect layer output if requested
+            if collect_layers:
+                # Convert relative idx to absolute layer index
+                absolute_layer_idx = self.start_layer + idx
+                if absolute_layer_idx in collect_layers:
+                    # Store the layer output (hidden_states + residual for complete state)
+                    layer_hidden_states[absolute_layer_idx] = (hidden_states + residual).clone()
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
+            tensors_dict = {
                 "hidden_states": hidden_states,
                 "residual": residual
-            })
+            }
+            # Include collected layer hidden states if any
+            if layer_hidden_states:
+                tensors_dict['_vllm_layer_hidden_states'] = layer_hidden_states
+            return IntermediateTensors(tensors_dict)
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        # If we collected layer hidden states, we need to return IntermediateTensors
+        # even at the last rank so ModelRunner can extract them
+        print(f"layer_hidden_states: {layer_hidden_states}")
+        if layer_hidden_states:
+            tensors_dict = {"final_hidden_states": hidden_states}
+            print(f"tensors_dict: {tensors_dict}")
+            if len(aux_hidden_states) > 0:
+                tensors_dict["aux_hidden_states"] = aux_hidden_states
+            tensors_dict['_vllm_layer_hidden_states'] = layer_hidden_states
+            return IntermediateTensors(tensors_dict)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
@@ -580,9 +609,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(input_ids, positions, intermediate_tensors,
-                                  inputs_embeds)
+                                  inputs_embeds, **kwargs)
         return model_output
 
     def compute_logits(

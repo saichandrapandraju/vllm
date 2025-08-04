@@ -37,6 +37,9 @@ class CompletionOutput:
             to stop, None if the completion finished for some other reason
             including encountering the EOS token.
         lora_request: The LoRA request that was used to generate the output.
+        hidden_states: Hidden states of the last token from requested layers.
+            Format: {layer_index: [h1, h2, ..., h_hidden_size]}.
+            Only present when return_hidden_states=True. (vLLM-specific)
     """
 
     index: int
@@ -47,18 +50,23 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+    hidden_states: Optional[dict[int, list[float]]] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
 
     def __repr__(self) -> str:
+        hidden_states_summary = None
+        if self.hidden_states:
+            hidden_states_summary = {k: f"[{len(v)} values]" for k, v in self.hidden_states.items()}
         return (f"CompletionOutput(index={self.index}, "
                 f"text={self.text!r}, "
                 f"token_ids={self.token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs}, "
                 f"finish_reason={self.finish_reason}, "
-                f"stop_reason={self.stop_reason})")
+                f"stop_reason={self.stop_reason}, "
+                f"hidden_states={hidden_states_summary})")
 
 
 @dataclass
