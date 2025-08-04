@@ -157,6 +157,16 @@ class SamplingParams(
             always return the log probability of the sampled token, so there
             may be up to `logprobs+1` elements in the response.
         prompt_logprobs: Number of log probabilities to return per prompt token.
+        hidden_states: Controls extraction of hidden states from transformer layers.
+            When set to None or False, no hidden states are returned. When set to True,
+            hidden states from all layers are returned. When set to a list of integers,
+            hidden states from only the specified layer indices are returned.
+            The hidden states are returned as tensors with shape [seq_len, hidden_size].
+            Note: Enabling this feature may increase memory usage significantly.
+            For memory efficiency, consider:
+            - Using specific layer indices instead of True
+            - Using smaller models for analysis
+            - Processing results immediately and discarding unused states
         detokenize: Whether to detokenize the output. Defaults to True.
         skip_special_tokens: Whether to skip special tokens in the output.
         spaces_between_special_tokens: Whether to add spaces between special
@@ -198,6 +208,7 @@ class SamplingParams(
     min_tokens: int = 0
     logprobs: Optional[int] = None
     prompt_logprobs: Optional[int] = None
+    hidden_states: Optional[Union[bool, list[int]]] = None
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
@@ -247,6 +258,7 @@ class SamplingParams(
         min_tokens: int = 0,
         logprobs: Optional[int] = None,
         prompt_logprobs: Optional[int] = None,
+        hidden_states: Optional[Union[bool, list[int]]] = None,
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
@@ -290,6 +302,7 @@ class SamplingParams(
             min_tokens=min_tokens,
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
+            hidden_states=hidden_states,
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
@@ -420,6 +433,21 @@ class SamplingParams(
         if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
             raise ValueError(f"prompt_logprobs must be non-negative, got "
                              f"{self.prompt_logprobs}.")
+        if self.hidden_states is not None:
+            if isinstance(self.hidden_states, list):
+                if not all(isinstance(layer, int) and layer >= 0 
+                          for layer in self.hidden_states):
+                    raise ValueError(
+                        f"hidden_states must contain only non-negative integers, "
+                        f"got {self.hidden_states}.")
+                if len(self.hidden_states) != len(set(self.hidden_states)):
+                    raise ValueError(
+                        f"hidden_states must not contain duplicate layer indices, "
+                        f"got {self.hidden_states}.")
+            elif not isinstance(self.hidden_states, bool):
+                raise ValueError(
+                    f"hidden_states must be a boolean or list of integers, "
+                    f"got {type(self.hidden_states)}.")
         if (self.truncate_prompt_tokens is not None
                 and self.truncate_prompt_tokens < 1):
             raise ValueError(f"truncate_prompt_tokens must be >= 1, "

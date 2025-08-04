@@ -426,6 +426,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
     prompt_logprobs: Optional[int] = None
     allowed_token_ids: Optional[list[int]] = None
     bad_words: list[str] = Field(default_factory=list)
+    hidden_states: Optional[Union[bool, list[int]]] = Field(
+        default=None,
+        description=(
+            "Whether to return hidden states from transformer layers. "
+            "If true, returns hidden states from all layers. "
+            "If a list of integers, returns hidden states from the specified layer indices. "
+            "Note: This significantly increases response size and memory usage."),
+    )
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
@@ -693,6 +701,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words= self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
+            hidden_states=self.hidden_states,
             extra_args=extra_args or None,
         )
 
@@ -960,6 +969,14 @@ class CompletionRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     allowed_token_ids: Optional[list[int]] = None
     prompt_logprobs: Optional[int] = None
+    hidden_states: Optional[Union[bool, list[int]]] = Field(
+        default=None,
+        description=(
+            "Whether to return hidden states from transformer layers. "
+            "If true, returns hidden states from all layers. "
+            "If a list of integers, returns hidden states from the specified layer indices. "
+            "Note: This significantly increases response size and memory usage."),
+    )
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
@@ -1178,6 +1195,7 @@ class CompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
+            hidden_states=self.hidden_states,
             extra_args=extra_args or None,
             )
 
@@ -1452,6 +1470,13 @@ class CompletionResponseChoice(OpenAIBaseModel):
             "including encountering the EOS token"),
     )
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    hidden_states: Optional[dict[str, list[list[float]]]] = Field(
+        default=None,
+        description=(
+            "Hidden states from transformer layers if requested. "
+            "Dict mapping layer indices to hidden state arrays. "
+            "Each hidden state is a 2D array of shape [seq_len, hidden_size]."),
+    )
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -1649,6 +1674,13 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     finish_reason: Optional[str] = "stop"
     # not part of the OpenAI spec but included in vLLM for legacy reasons
     stop_reason: Optional[Union[int, str]] = None
+    hidden_states: Optional[dict[str, list[list[float]]]] = Field(
+        default=None,
+        description=(
+            "Hidden states from transformer layers if requested. "
+            "Dict mapping layer indices to hidden state arrays. "
+            "Each hidden state is a 2D array of shape [seq_len, hidden_size]."),
+    )
 
 
 class ChatCompletionResponse(OpenAIBaseModel):

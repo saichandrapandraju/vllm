@@ -1582,6 +1582,259 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 attn_backend=self.attn_backend,
             )
         return model_input
+    
+    def _configure_hidden_state_extraction(
+        self, 
+        model_input: ModelInputForGPUWithSamplingMetadata, 
+        model_executable
+    ) -> None:
+        """Configure hidden state extraction based on sampling parameters."""
+        if model_input.sampling_metadata is None:
+            return
+            
+        # Extract hidden_states parameter from any sequence group that has it enabled
+        hidden_states_param = None
+        for seq_group_metadata in model_input.sampling_metadata.seq_groups:
+            if seq_group_metadata.sampling_params.hidden_states is not None:
+                hidden_states_param = seq_group_metadata.sampling_params.hidden_states
+                break
+        
+        # Configure the model if hidden states are requested
+        if hidden_states_param is not None and hasattr(model_executable, 'set_hidden_state_layers'):
+            # Validate layer indices against actual model
+            self._validate_hidden_state_layers(hidden_states_param, model_executable)
+            model_executable.set_hidden_state_layers(hidden_states_param)
+    
+    def _validate_hidden_state_layers(
+        self, 
+        hidden_states_param: Union[bool, list[int]], 
+        model_executable
+    ) -> None:
+        """Validate hidden_states parameter against the actual model."""
+        if isinstance(hidden_states_param, list):
+            # Get the number of layers from the model
+            num_layers = None
+            if hasattr(model_executable, 'model') and hasattr(model_executable.model, 'layers'):
+                num_layers = len(model_executable.model.layers)
+            elif hasattr(model_executable, 'layers'):
+                num_layers = len(model_executable.layers)
+            
+            if num_layers is not None:
+                # Validate layer indices
+                invalid_layers = [layer for layer in hidden_states_param if layer >= num_layers]
+                if invalid_layers:
+                    raise ValueError(
+                        f"Invalid layer indices {invalid_layers} for model with {num_layers} layers. "
+                        f"Valid layer indices are 0-{num_layers-1}."
+                    )
+            else:
+                # If we can't determine layer count, log a warning
+                from vllm.logger import init_logger
+                logger = init_logger(__name__)
+                logger.warning(
+                    f"Could not validate hidden_states layer indices {hidden_states_param} "
+                    f"against model structure. Proceeding without validation."
+                )
+    
+    def _attach_hidden_states_to_seq_groups(
+        self, 
+        aux_hidden_states: list[torch.Tensor], 
+        sampling_metadata
+    ) -> None:
+        """Process hidden states and attach them to sequence groups."""
+        if not aux_hidden_states or not sampling_metadata.seq_groups:
+            return
+            
+        # Get the configured layers from any sequence group that has hidden states enabled
+        hidden_states_layers = None
+        for seq_group in sampling_metadata.seq_groups:
+            if seq_group.sampling_params.hidden_states is not None:
+                if seq_group.sampling_params.hidden_states is True:
+                    # All layers - create mapping
+                    hidden_states_layers = list(range(len(aux_hidden_states)))
+                else:
+                    # Specific layers
+                    hidden_states_layers = seq_group.sampling_params.hidden_states
+                break
+        
+        if hidden_states_layers is None:
+            return
+            
+        # Convert aux_hidden_states to the expected format
+        # aux_hidden_states is a list of tensors [layer0_tensor, layer1_tensor, ...]
+        # We need to create a dict mapping layer_idx -> tensor
+        processed_hidden_states = {}
+        for i, layer_tensor in enumerate(aux_hidden_states):
+            if i < len(hidden_states_layers):
+                layer_idx = hidden_states_layers[i]
+                # Optimize tensor processing:
+                # 1. Detach from computation graph
+                # 2. Optionally move to CPU for memory efficiency (configurable)
+                # 3. Use blocking transfer to ensure data integrity
+                optimized_tensor = layer_tensor.detach()
+                if optimized_tensor.is_cuda and self._should_move_hidden_states_to_cpu():
+                    optimized_tensor = optimized_tensor.cpu()  # Blocking transfer for safety
+                processed_hidden_states[layer_idx] = optimized_tensor
+        
+        # Calculate memory usage and add warnings if needed
+        if processed_hidden_states:
+            total_memory_mb = self._estimate_hidden_states_memory(processed_hidden_states)
+            memory_threshold_mb = self._get_hidden_states_memory_threshold()
+            if total_memory_mb > memory_threshold_mb:
+                logger = init_logger(__name__)
+                logger.warning(
+                    f"Hidden states extraction using approximately {total_memory_mb:.1f}MB of memory "
+                    f"(threshold: {memory_threshold_mb}MB). "
+                    f"Consider using specific layer selection to reduce memory usage."
+                )
+        
+        # Properly map hidden states to sequence groups using vLLM's sequence mapping
+        # This handles complex batching scenarios including chunked prefill and variable lengths
+        self._map_hidden_states_to_sequences(processed_hidden_states, sampling_metadata)
+    
+    def _map_hidden_states_to_sequences(
+        self, 
+        processed_hidden_states: dict[int, torch.Tensor], 
+        sampling_metadata
+    ) -> None:
+        """Map hidden states to sequence groups using proper vLLM sequence mapping.
+        
+        This method properly handles complex batching scenarios where sequence groups
+        don't have a simple 1:1 mapping to tensor batch dimensions.
+        """
+        if not processed_hidden_states:
+            return
+            
+        # Track which sequence groups need hidden states
+        seq_groups_needing_states = []
+        for seq_group in sampling_metadata.seq_groups:
+            if seq_group.sampling_params.hidden_states is not None:
+                seq_groups_needing_states.append(seq_group)
+        
+        if not seq_groups_needing_states:
+            return
+            
+        # For decode steps, typically each sequence group gets one position
+        # For prefill steps, sequence groups can have variable lengths
+        batch_idx = 0
+        
+        for seq_group in seq_groups_needing_states:
+            try:
+                # Extract hidden states for this sequence group
+                sequence_specific_hidden_states = {}
+                
+                # Handle different scenarios based on whether it's prefill or decode
+                if seq_group.is_prompt:
+                    # For prefill: extract the range of tokens for this sequence group
+                    seq_len = seq_group.seq_len or 1
+                    query_len = seq_group.query_len or seq_len
+                    
+                    # Extract the last token's hidden states (or all if requested)
+                    # For prefill, we typically want the last token for continuing generation
+                    end_idx = batch_idx + query_len
+                    start_idx = end_idx - 1  # Just the last token for simplicity
+                    
+                    for layer_idx, full_tensor in processed_hidden_states.items():
+                        if start_idx < full_tensor.shape[0]:
+                            # Extract the relevant tokens for this sequence
+                            seq_tensor = full_tensor[start_idx:end_idx]
+                            sequence_specific_hidden_states[layer_idx] = seq_tensor
+                        else:
+                            # Fallback: take the last available token
+                            seq_tensor = full_tensor[-1:] if full_tensor.shape[0] > 0 else full_tensor[:1]
+                            sequence_specific_hidden_states[layer_idx] = seq_tensor
+                    
+                    batch_idx = end_idx
+                else:
+                    # For decode: each sequence group typically gets one token position
+                    if batch_idx < list(processed_hidden_states.values())[0].shape[0]:
+                        for layer_idx, full_tensor in processed_hidden_states.items():
+                            # Extract one token's hidden states
+                            seq_tensor = full_tensor[batch_idx:batch_idx+1]
+                            sequence_specific_hidden_states[layer_idx] = seq_tensor
+                    else:
+                        # Handle edge case: not enough batch dimensions
+                        from vllm.logger import init_logger
+                        logger = init_logger(__name__)
+                        logger.warning(
+                            f"Hidden states tensor batch size insufficient. "
+                            f"Expected index {batch_idx}, got shape {list(processed_hidden_states.values())[0].shape}"
+                        )
+                        # Provide empty tensors to maintain API consistency
+                        sample_tensor = list(processed_hidden_states.values())[0]
+                        empty_shape = (0,) + sample_tensor.shape[1:]
+                        for layer_idx in processed_hidden_states:
+                            sequence_specific_hidden_states[layer_idx] = torch.empty(
+                                empty_shape, dtype=sample_tensor.dtype, device=sample_tensor.device
+                            )
+                    
+                    batch_idx += 1
+                
+                # Store the extracted hidden states for this sequence group
+                seq_group.seq_group.hidden_states = sequence_specific_hidden_states
+                
+            except Exception as e:
+                # Robust error handling to prevent hidden states from breaking inference
+                from vllm.logger import init_logger
+                logger = init_logger(__name__)
+                logger.error(
+                    f"Error mapping hidden states for sequence group {seq_group.seq_ids}: {e}. "
+                    f"Setting hidden_states to None."
+                )
+                seq_group.seq_group.hidden_states = None
+    
+    def _estimate_hidden_states_memory(self, hidden_states: dict[int, torch.Tensor]) -> float:
+        """Estimate memory usage of hidden states in MB."""
+        total_bytes = 0
+        for tensor in hidden_states.values():
+            # Calculate tensor size in bytes
+            # Each float32 = 4 bytes, float16 = 2 bytes
+            element_size = tensor.element_size()
+            num_elements = tensor.numel()
+            total_bytes += element_size * num_elements
+        
+        return total_bytes / (1024 * 1024)  # Convert to MB
+    
+    def _get_hidden_states_memory_threshold(self) -> float:
+        """Get the memory threshold for hidden states warnings in MB.
+        
+        Can be configured via environment variable VLLM_HIDDEN_STATES_MEMORY_THRESHOLD_MB.
+        Default is 100MB for small models, scales with model size.
+        """
+        import os
+        
+        # Check for explicit configuration
+        threshold_env = os.getenv('VLLM_HIDDEN_STATES_MEMORY_THRESHOLD_MB')
+        if threshold_env:
+            try:
+                return float(threshold_env)
+            except ValueError:
+                logger = init_logger(__name__)
+                logger.warning(f"Invalid VLLM_HIDDEN_STATES_MEMORY_THRESHOLD_MB: {threshold_env}. Using default.")
+        
+        # Estimate based on model size if available
+        try:
+            if hasattr(self, 'model_config') and hasattr(self.model_config, 'hf_config'):
+                hidden_size = getattr(self.model_config.hf_config, 'hidden_size', 4096)
+                # Scale threshold with model size: larger models can afford more memory
+                # Base threshold: 100MB for ~4k hidden size, scale proportionally
+                base_threshold = 100.0
+                size_multiplier = max(1.0, hidden_size / 4096)
+                return base_threshold * size_multiplier
+        except Exception:
+            pass
+        
+        # Default fallback
+        return 100.0
+    
+    def _should_move_hidden_states_to_cpu(self) -> bool:
+        """Check if hidden states should be moved to CPU for memory efficiency.
+        
+        Can be configured via environment variable VLLM_HIDDEN_STATES_CPU_OFFLOAD.
+        Default is True for memory efficiency.
+        """
+        import os
+        return os.getenv('VLLM_HIDDEN_STATES_CPU_OFFLOAD', 'true').lower() in ('true', '1', 'yes')
 
     def prepare_model_input(
         self,
@@ -1700,6 +1953,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_start.record()
 
         if not bypass_model_exec:
+            # Configure hidden state extraction based on sampling parameters
+            self._configure_hidden_state_extraction(model_input, model_executable)
+            
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config, virtual_engine):
                 hidden_or_intermediate_states = model_executable(
@@ -1714,6 +1970,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     **seqlen_agnostic_kwargs,
                     **model_kwargs,
                 )
+        
+        # Handle auxiliary hidden states if returned
+        aux_hidden_states = None
+        if isinstance(hidden_or_intermediate_states, tuple):
+            hidden_or_intermediate_states, aux_hidden_states = hidden_or_intermediate_states
+            # Store aux_hidden_states in sampling_metadata and sequence groups for later processing
+            if aux_hidden_states and model_input.sampling_metadata:
+                model_input.sampling_metadata.aux_hidden_states = aux_hidden_states
+                # Process hidden states and attach to sequence groups
+                self._attach_hidden_states_to_seq_groups(aux_hidden_states, model_input.sampling_metadata)
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):

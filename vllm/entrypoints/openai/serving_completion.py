@@ -541,6 +541,14 @@ class OpenAIServingCompletion(OpenAIServing):
                 else:
                     logprobs = None
 
+                # Convert hidden states from tensors to lists for JSON serialization
+                hidden_states_json = None
+                if output.hidden_states is not None:
+                    hidden_states_json = {}
+                    for layer_idx, hidden_state_tensor in output.hidden_states.items():
+                        # Convert tensor to nested list: [seq_len, hidden_size]
+                        hidden_states_json[layer_idx] = hidden_state_tensor.tolist()
+                
                 choice_data = CompletionResponseChoice(
                     index=len(choices),
                     text=output_text,
@@ -548,6 +556,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason=output.finish_reason,
                     stop_reason=output.stop_reason,
                     prompt_logprobs=final_res.prompt_logprobs,
+                    hidden_states=hidden_states_json,
                 )
                 choices.append(choice_data)
 

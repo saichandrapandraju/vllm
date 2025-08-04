@@ -745,6 +745,7 @@ class SequenceGroup:
         self.priority = priority
 
         self.cached_request_output = None
+        self.hidden_states: Optional[dict[int, torch.Tensor]] = None
 
     @property
     def prompt(self) -> Optional[str]:

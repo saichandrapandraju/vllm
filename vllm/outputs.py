@@ -32,6 +32,8 @@ class CompletionOutput:
             output text.
         logprobs: The log probabilities of the top probability words at each
             position if the logprobs are requested.
+        hidden_states: The hidden states from transformer layers if requested.
+            A dictionary mapping layer indices to tensors of shape [seq_len, hidden_size].
         finish_reason: The reason why the sequence is finished.
         stop_reason: The stop string or token id that caused the completion
             to stop, None if the completion finished for some other reason
@@ -44,6 +46,7 @@ class CompletionOutput:
     token_ids: GenericSequence[int]
     cumulative_logprob: Optional[float]
     logprobs: Optional[SampleLogprobs]
+    hidden_states: Optional[dict[int, torch.Tensor]] = None
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
@@ -52,11 +55,14 @@ class CompletionOutput:
         return self.finish_reason is not None
 
     def __repr__(self) -> str:
+        hidden_states_repr = (f"layers={list(self.hidden_states.keys())}" 
+                             if self.hidden_states else None)
         return (f"CompletionOutput(index={self.index}, "
                 f"text={self.text!r}, "
                 f"token_ids={self.token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs}, "
+                f"hidden_states={hidden_states_repr}, "
                 f"finish_reason={self.finish_reason}, "
                 f"stop_reason={self.stop_reason})")
 
@@ -280,16 +286,23 @@ class RequestOutput:
                 output.cumulative_logprob = seq.get_cumulative_logprob() \
                     if include_logprobs else None
                 output.logprobs = output_logprobs
+                # Update hidden states if available
+                if hasattr(seq_group, 'hidden_states') and seq_group.hidden_states is not None:
+                    output.hidden_states = seq_group.hidden_states
                 output.finish_reason = SequenceStatus.get_finished_reason(
                     seq.status)
                 output.stop_reason = seq.stop_reason
 
             else:
+                # Get hidden states from sequence group if available
+                hidden_states = seq_group.hidden_states if hasattr(seq_group, 'hidden_states') else None
+                
                 output = CompletionOutput(
                     top_n_seqs.index(seq), output_text, [output_token_ids]
                     if isinstance(output_token_ids, int) else output_token_ids,
                     seq.get_cumulative_logprob() if include_logprobs else None,
                     output_logprobs,
+                    hidden_states,
                     SequenceStatus.get_finished_reason(seq.status),
                     seq.stop_reason)
 

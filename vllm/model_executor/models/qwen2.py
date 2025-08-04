@@ -504,3 +504,24 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
+    
+    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
+        self.model.aux_hidden_state_layers = layers
+    
+    def set_hidden_state_layers(self, hidden_states_param: Optional[Union[bool, list[int]]]) -> None:
+        """Set which layers to extract hidden states from.
+        
+        Args:
+            hidden_states_param: None/False for no extraction, True for all layers,
+                                or list of layer indices for specific layers.
+        """
+        if hidden_states_param is None or hidden_states_param is False:
+            layers = tuple()
+        elif hidden_states_param is True:
+            # Extract from all layers
+            layers = tuple(range(len(self.model.layers)))
+        else:
+            # Specific layer indices
+            layers = tuple(hidden_states_param)
+        
+        self.set_aux_hidden_state_layers(layers)

@@ -144,6 +144,7 @@ class SamplingMetadata:
         self.num_prompts = num_prompts
         self.skip_sampler_cpu_output = skip_sampler_cpu_output
         self.reuse_sampling_tensors = reuse_sampling_tensors
+        self.aux_hidden_states: Optional[list[torch.Tensor]] = None
 
     @staticmethod
     def prepare(

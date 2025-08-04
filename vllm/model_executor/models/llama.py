@@ -54,6 +54,7 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
+from ..hidden_states_mixin import HiddenStatesExtractorMixin
 
 
 class LlamaMLP(nn.Module):
@@ -470,7 +471,7 @@ class LlamaModel(nn.Module):
         return loaded_params
 
 
-class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, HiddenStatesExtractorMixin):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
@@ -555,9 +556,19 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+        
+        # Initialize hidden states extraction mixin
+        self.__init_hidden_states__()
 
-    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
-        self.model.aux_hidden_state_layers = layers
+    def get_model_layers(self):
+        """Return the model's transformer layers for hidden states extraction.
+        
+        Returns:
+            The model's layers (self.model.layers) or None if unavailable.
+        """
+        if hasattr(self, 'model') and hasattr(self.model, 'layers'):
+            return self.model.layers
+        return None
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
         num_layers = len(self.model.layers)

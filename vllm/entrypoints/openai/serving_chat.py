@@ -1111,13 +1111,22 @@ class OpenAIServingChat(OpenAIServing):
                                       reasoning_content=reasoning_content,
                                       content=content)
 
+            # Convert hidden states from tensors to lists for JSON serialization
+            hidden_states_json = None
+            if output.hidden_states is not None:
+                hidden_states_json = {}
+                for layer_idx, hidden_state_tensor in output.hidden_states.items():
+                    # Convert tensor to nested list: [seq_len, hidden_size]
+                    hidden_states_json[layer_idx] = hidden_state_tensor.tolist()
+            
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
                 finish_reason="tool_calls" if auto_tools_called else
                 output.finish_reason if output.finish_reason else "stop",
-                stop_reason=output.stop_reason)
+                stop_reason=output.stop_reason,
+                hidden_states=hidden_states_json)
             choices.append(choice_data)
 
         if request.echo:
