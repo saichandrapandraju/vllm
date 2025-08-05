@@ -60,6 +60,7 @@ def test_v1_intermediate_layers():
     if output1.hidden_states:
         for layer_idx, states in output1.hidden_states.items():
             print(f"  Layer {layer_idx}: {len(states)} values")
+            print(f"         layer_hidden_states: {states[:10]}...")
     
     # Test 2: Request mixed layers including final 
     print(f"\n🧪 Test 2: Requesting mixed layers [0, 15, {model_layers-1}] (should work)")
@@ -80,6 +81,7 @@ def test_v1_intermediate_layers():
     if output2.hidden_states:
         for layer_idx, states in output2.hidden_states.items():
             print(f"  Layer {layer_idx}: {len(states)} values")
+            print(f"         layer_hidden_states: {states[:10]}...")
     
     # Test 3: Request final layer only (should definitely work)
     print(f"\n🧪 Test 3: Requesting final layer [{model_layers-1}] only (should work)")
@@ -100,7 +102,7 @@ def test_v1_intermediate_layers():
     if output3.hidden_states:
         for layer_idx, states in output3.hidden_states.items():
             print(f"  Layer {layer_idx}: {len(states)} values")
-    
+            print(f"         layer_hidden_states: {states[:10]}...")
     # Test 4: Negative indexing
     print("\n🧪 Test 4: Requesting with negative indexing [-1, -2] (should work)")
     params4 = SamplingParams(
@@ -122,7 +124,7 @@ def test_v1_intermediate_layers():
     if output4.hidden_states:
         for layer_idx, states in output4.hidden_states.items():
             print(f"  Layer {layer_idx}: {len(states)} values")
-    
+            print(f"         layer_hidden_states: {states[:10]}...")
     # Count successful tests
     successes = []
     successes.append(output1.hidden_states is not None)

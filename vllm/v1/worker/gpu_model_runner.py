@@ -2169,6 +2169,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_hidden_states_config(self, scheduler_output: "SchedulerOutput") -> Optional[list[int]]:
         """Check if any sequences request hidden states and return target layers.
         
+        Optimization: Only collect hidden states on the final token generation step
+        to reduce memory usage and GPU→CPU transfer overhead.
+        
         Returns:
             List of layer indices to collect, or None if no collection needed
         """
@@ -2183,9 +2186,38 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_layers = self.model_config.get_num_layers(self.parallel_config)
                     target_layers = req_state.sampling_params.resolve_hidden_states_layers(num_layers)
                     if target_layers:
-                        logger.info(f"V1 Backend: Hidden states requested for layers {target_layers}")
-                        return target_layers
+                        # Optimization: Only collect on final token generation
+                        if self._should_collect_hidden_states_now(req_state, scheduler_output, req_id):
+                            # Only log once per request to reduce noise
+                            if not hasattr(self, '_logged_hidden_states_requests'):
+                                self._logged_hidden_states_requests = set()
+                            if req_id not in self._logged_hidden_states_requests:
+                                logger.info(f"V1 Backend: Hidden states requested for layers {target_layers} (final token only)")
+                                self._logged_hidden_states_requests.add(req_id)
+                            return target_layers
         return None
+    
+    def _should_collect_hidden_states_now(self, req_state, scheduler_output, req_id) -> bool:
+        """Determine if we should collect hidden states on this generation step.
+        
+        Only collect on the final token generation to optimize memory usage.
+        """
+        # Get max_tokens from sampling params
+        max_tokens = getattr(req_state.sampling_params, 'max_tokens', None)
+        if max_tokens is None:
+            # If no max_tokens specified, collect on every step (conservative)
+            return True
+            
+        # Calculate how many output tokens we've generated so far
+        prompt_tokens = len(req_state.prompt_token_ids)
+        current_total_tokens = req_state.num_computed_tokens + len(req_state.output_token_ids)
+        generated_tokens = current_total_tokens - prompt_tokens
+        
+        # We're at the final step if we've generated (max_tokens - 1) tokens
+        # This means the next token will be the final one
+        is_final_step = generated_tokens >= (max_tokens - 1)
+        
+        return is_final_step
         
     def _extract_layer_hidden_states_v1_intermediate(self, layer_hidden_states_tensor: dict, target_layers: list[int], logits_indices: torch.Tensor):
         """Extract and format hidden states from V1 intermediate tensors with layer collection.
@@ -2207,8 +2239,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not target_layers or not layer_hidden_states_tensor:
             return None
             
-        logger.info(f"V1 Backend: Extracting intermediate layer hidden states for layers {target_layers}")
-        logger.info(f"V1 Backend: Available layers from model: {list(layer_hidden_states_tensor.keys())}")
+        # Only log detailed info on first extraction to reduce noise
+        if not hasattr(self, '_logged_hidden_states_extraction'):
+            logger.info(f"V1 Backend: Extracting intermediate layer hidden states for layers {target_layers}")
+            logger.info(f"V1 Backend: Available layers from model: {list(layer_hidden_states_tensor.keys())}")
+            self._logged_hidden_states_extraction = True
         
         result = {}
         for layer_idx in target_layers:
@@ -2217,7 +2252,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 layer_states = layer_hidden_states_tensor[layer_idx]
                 last_token_states = layer_states[logits_indices]
                 result[layer_idx] = last_token_states.cpu().flatten().tolist()
-                logger.info(f"V1 Backend: Successfully extracted hidden states for layer {layer_idx}")
             else:
                 logger.warning(f"V1 Backend: Layer {layer_idx} was requested but not collected during forward pass")
         

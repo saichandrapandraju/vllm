@@ -393,7 +393,10 @@ class LlamaModel(nn.Module):
         if collect_layers:
             from vllm.logger import init_logger
             logger = init_logger(__name__)
-            logger.info(f"LlamaModel: collecting hidden states for layers: {collect_layers}")
+            # Only log on first collection to reduce noise during multi-token generation
+            if not hasattr(self, '_logged_hidden_states_collection'):
+                logger.info(f"LlamaModel: collecting hidden states for layers: {collect_layers}")
+                self._logged_hidden_states_collection = True
         
         aux_hidden_states = []
         for idx, layer in enumerate(
@@ -409,7 +412,10 @@ class LlamaModel(nn.Module):
                 if absolute_layer_idx in collect_layers:
                     # Store the layer output (hidden_states + residual for complete state)
                     layer_hidden_states[absolute_layer_idx] = (hidden_states + residual).clone()
-                    logger.info(f"LlamaModel: collected hidden states for layer {absolute_layer_idx}")
+                    # Only log collection details on first pass to reduce noise
+                    if not hasattr(self, '_logged_layer_collection'):
+                        logger.info(f"LlamaModel: collecting from layers during forward pass")
+                        self._logged_layer_collection = True
 
         if not get_pp_group().is_last_rank:
             tensors_dict = {
