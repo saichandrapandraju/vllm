@@ -1554,6 +1554,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # compiled with full CUDA graphs, we have to skip them entirely.
         skip_cuda_graphs = self.full_cuda_graph and not attention_cuda_graphs
 
+        # Get hidden states configuration for this batch
+        hidden_states_config = self._get_hidden_states_config(scheduler_output)
+            
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(
@@ -1565,22 +1568,42 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), self.maybe_get_kv_connector_output(
                 scheduler_output) as kv_connector_output:
 
+            # Prepare model call arguments, handling hidden states config separately
+            model_call_kwargs = MultiModalKwargs.as_kwargs(
+                model_kwargs,
+                device=self.device,
+            )
+            if hidden_states_config:
+                model_call_kwargs['_vllm_hidden_states_layers'] = hidden_states_config
+
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
-                **MultiModalKwargs.as_kwargs(
-                    model_kwargs,
-                    device=self.device,
-                ),
+                **model_call_kwargs,
             )
 
+        # Handle model output and extract layer hidden states if present
+        layer_hidden_states_tensor = None
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
         else:
-            hidden_states = model_output
-            aux_hidden_states = None
+            # Check if model_output is IntermediateTensors (contains layer hidden states)
+            from vllm.sequence import IntermediateTensors
+            if isinstance(model_output, IntermediateTensors) and '_vllm_layer_hidden_states' in model_output.tensors:
+                # This is an IntermediateTensors with layer hidden states
+                layer_hidden_states_tensor = model_output.tensors['_vllm_layer_hidden_states']
+                if 'final_hidden_states' in model_output.tensors:
+                    hidden_states = model_output.tensors['final_hidden_states']
+                    aux_hidden_states = model_output.tensors.get('aux_hidden_states')
+                else:
+                    # This shouldn't happen in last rank, but handle gracefully
+                    hidden_states = model_output.tensors.get('hidden_states', model_output)
+                    aux_hidden_states = None
+            else:
+                hidden_states = model_output
+                aux_hidden_states = None
 
         # Broadcast PP output for external_launcher (torchrun)
         # to make sure we are synced across pp ranks
@@ -1608,12 +1631,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             
             # Process layer-wise hidden states if requested 
             layer_hidden_states = None
-            hidden_states_config = self._get_hidden_states_config(scheduler_output)
-            if hidden_states_config and isinstance(hidden_states, torch.Tensor):
-                # For V1, we need to extract from the regular hidden states tensor
-                # Get the last token hidden states for each sequence
-                layer_hidden_states = self._extract_layer_hidden_states_v1(
-                    hidden_states, hidden_states_config, logits_indices)
+            if hidden_states_config:
+                if layer_hidden_states_tensor:
+                    # Extract from collected intermediate tensors
+                    layer_hidden_states = self._extract_layer_hidden_states_v1_intermediate(
+                        layer_hidden_states_tensor, hidden_states_config, logits_indices)
+                elif isinstance(hidden_states, torch.Tensor):
+                    # Fallback: extract from final hidden states tensor only
+                    layer_hidden_states = self._extract_layer_hidden_states_v1(
+                        hidden_states, hidden_states_config, logits_indices)
         if broadcast_pp_output:
             model_output_broadcast_data = {
                 "logits": logits.contiguous(),
@@ -2157,14 +2183,46 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_layers = self.model_config.get_num_layers(self.parallel_config)
                     target_layers = req_state.sampling_params.resolve_hidden_states_layers(num_layers)
                     if target_layers:
-                        final_layer_idx = num_layers - 1
                         logger.info(f"V1 Backend: Hidden states requested for layers {target_layers}")
-                        if final_layer_idx not in target_layers:
-                            logger.warning(f"V1 Backend: Requested layers {target_layers} but V1 only supports final layer ({final_layer_idx}). "
-                                         f"Consider using V0 backend for intermediate layer access.")
                         return target_layers
         return None
         
+    def _extract_layer_hidden_states_v1_intermediate(self, layer_hidden_states_tensor: dict, target_layers: list[int], logits_indices: torch.Tensor):
+        """Extract and format hidden states from V1 intermediate tensors with layer collection.
+        
+        V1 backend enhancement: Can now provide hidden states from any requested layer
+        that was collected during the forward pass.
+        
+        Args:
+            layer_hidden_states_tensor: Dict mapping layer indices to their hidden states
+            target_layers: List of layer indices requested by user
+            logits_indices: Indices for extracting last token states
+            
+        Returns:
+            Dict mapping layer indices to hidden state lists for last token, or None
+        """
+        from vllm.logger import init_logger
+        logger = init_logger(__name__)
+        
+        if not target_layers or not layer_hidden_states_tensor:
+            return None
+            
+        logger.info(f"V1 Backend: Extracting intermediate layer hidden states for layers {target_layers}")
+        logger.info(f"V1 Backend: Available layers from model: {list(layer_hidden_states_tensor.keys())}")
+        
+        result = {}
+        for layer_idx in target_layers:
+            if layer_idx in layer_hidden_states_tensor:
+                # Extract last token states for this layer
+                layer_states = layer_hidden_states_tensor[layer_idx]
+                last_token_states = layer_states[logits_indices]
+                result[layer_idx] = last_token_states.cpu().flatten().tolist()
+                logger.info(f"V1 Backend: Successfully extracted hidden states for layer {layer_idx}")
+            else:
+                logger.warning(f"V1 Backend: Layer {layer_idx} was requested but not collected during forward pass")
+        
+        return result if result else None
+
     def _extract_layer_hidden_states_v1(self, hidden_states: torch.Tensor, target_layers: list[int], logits_indices: torch.Tensor):
         """Extract and format hidden states from V1 model output.
         
