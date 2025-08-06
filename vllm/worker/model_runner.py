@@ -1080,50 +1080,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             # multi-step model runner does not have `_builder_cls`
             self.builder = self._builder_cls(weakref.proxy(self))
 
-    def _get_hidden_states_config(self, sampling_metadata: SamplingMetadata) -> Optional[list[int]]:
-        """Check if any sequences request hidden states and return target layers.
-        
-        Returns:
-            List of layer indices to collect, or None if no collection needed
-        """
-        if sampling_metadata is None:
-            return None
-            
-        # Check if any sampling params request hidden states
-        for seq_group in sampling_metadata.seq_groups:
-            if seq_group.sampling_params.return_hidden_states:
-                num_layers = self.model_config.get_num_layers(self.parallel_config)
-                target_layers = seq_group.sampling_params.resolve_hidden_states_layers(num_layers)
-                if target_layers:
-                    return target_layers
-        return None
-
-    def _extract_layer_hidden_states(self, intermediate_tensors: IntermediateTensors, target_layers: list[int], model_input: ModelInputForGPUWithSamplingMetadata):
-        """Extract and format hidden states from intermediate tensors.
-        
-        Returns:
-            Dict mapping layer indices to hidden state lists for last token
-        """
-        if not intermediate_tensors or '_vllm_layer_hidden_states' not in intermediate_tensors.tensors:
-            return None
-            
-        layer_states = intermediate_tensors.tensors['_vllm_layer_hidden_states']
-        if not layer_states:
-            return None
-            
-        # Get indices of last tokens for each sequence
-        indices = model_input.sampling_metadata.selected_token_indices
-        
-        # Format as {layer_idx: [floats...]}
-        formatted_states = {}
-        for layer_idx, states in layer_states.items():
-            if layer_idx in target_layers:
-                # Get hidden states for last token of each sequence
-                last_token_states = states.index_select(0, indices)
-                # Convert to CPU and flatten to list format
-                formatted_states[layer_idx] = last_token_states.cpu().flatten().tolist()
-        
-        return formatted_states if formatted_states else None
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -1739,11 +1695,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if previous_hidden_states is not None:
             model_kwargs["previous_hidden_states"] = previous_hidden_states
             
-        # Check if hidden states collection is requested
-        hidden_states_config = self._get_hidden_states_config(model_input.sampling_metadata)
-        logger.info(f"hidden_states_config: {hidden_states_config}")
-        if hidden_states_config:
-            model_kwargs['_vllm_hidden_states_layers'] = hidden_states_config
             
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
@@ -1894,16 +1845,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
             output.hidden_states = hidden_states
 
-        # Process layer-wise hidden states if requested
-        if hidden_states_config and isinstance(hidden_or_intermediate_states, IntermediateTensors):
-            logger.info(f"Processing layer hidden states from IntermediateTensors")
-            layer_hidden_states = self._extract_layer_hidden_states(
-                hidden_or_intermediate_states, hidden_states_config, model_input)
-            logger.info(f"Extracted layer_hidden_states: {layer_hidden_states is not None}")
-            if layer_hidden_states:
-                # Store in output for access by serving layer
-                if not hasattr(output, 'layer_hidden_states'):
-                    output.layer_hidden_states = layer_hidden_states
 
         return [output]
 

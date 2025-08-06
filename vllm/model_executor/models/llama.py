@@ -386,59 +386,20 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        # Check if layer-wise hidden states collection is requested
-        collect_layers = kwargs.get('_vllm_hidden_states_layers')
-        layer_hidden_states = {} if collect_layers else None
-        
-        if collect_layers:
-            from vllm.logger import init_logger
-            logger = init_logger(__name__)
-            # Only log on first collection to reduce noise during multi-token generation
-            if not hasattr(self, '_logged_hidden_states_collection'):
-                logger.info(f"LlamaModel: collecting hidden states for layers: {collect_layers}")
-                self._logged_hidden_states_collection = True
-        
         aux_hidden_states = []
         for idx, layer in enumerate(
                 self.layers[self.start_layer:self.end_layer]):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
-            
-            # Collect layer output if requested
-            if collect_layers:
-                # Convert relative idx to absolute layer index
-                absolute_layer_idx = self.start_layer + idx
-                if absolute_layer_idx in collect_layers:
-                    # Store the layer output (hidden_states + residual for complete state)
-                    layer_hidden_states[absolute_layer_idx] = (hidden_states + residual).clone()
-                    # Only log collection details on first pass to reduce noise
-                    if not hasattr(self, '_logged_layer_collection'):
-                        logger.info(f"LlamaModel: collecting from layers during forward pass")
-                        self._logged_layer_collection = True
 
         if not get_pp_group().is_last_rank:
-            tensors_dict = {
+            return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
-            }
-            # Include collected layer hidden states if any
-            if layer_hidden_states:
-                tensors_dict['_vllm_layer_hidden_states'] = layer_hidden_states
-            return IntermediateTensors(tensors_dict)
+            })
 
         hidden_states, _ = self.norm(hidden_states, residual)
-
-        # If we collected layer hidden states, we need to return IntermediateTensors
-        # even at the last rank so ModelRunner can extract them
-        # print(f"layer_hidden_states: {layer_hidden_states}")
-        if layer_hidden_states:
-            tensors_dict = {"final_hidden_states": hidden_states}
-            # print(f"tensors_dict: {tensors_dict}")
-            if len(aux_hidden_states) > 0:
-                tensors_dict["aux_hidden_states"] = aux_hidden_states
-            tensors_dict['_vllm_layer_hidden_states'] = layer_hidden_states
-            return IntermediateTensors(tensors_dict)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

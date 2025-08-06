@@ -1066,15 +1066,7 @@ class CompletionRequest(OpenAIBaseModel):
         default=False,
         description=(
             "Whether to return hidden states of the last token from "
-            "specified layers. (vLLM-specific extension)"),
-    )
-    hidden_states_layers: Optional[list[int]] = Field(
-        default=None,
-        description=(
-            "List of layer indices to return hidden states from. "
-            "Supports negative indexing (e.g., -1 for last layer). "
-            "If None and return_hidden_states is True, returns only "
-            "the last layer. (vLLM-specific extension)"),
+            "the final layer only. (vLLM-specific extension)"),
     )
 
     # --8<-- [end:completion-extra-params]
@@ -1194,7 +1186,6 @@ class CompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             return_hidden_states=self.return_hidden_states,
-            hidden_states_layers=self.hidden_states_layers,
             extra_args=extra_args or None,
             )
 
